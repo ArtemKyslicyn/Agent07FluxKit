@@ -1,0 +1,71 @@
+name: CI
+
+# Build + unit tests on every push to main and every PR.
+# Integration tests in IntegrationTests.swift auto-skip when no FLUX model
+# is on disk, so they run as no-ops on CI — there's no realistic way to
+# pull a 24 GB model archive into a hosted runner per build.
+#
+# Public repo → macOS runners are free (1× multiplier), so we run on every
+# push and PR without path filtering beyond docs-only changes.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build + Unit Tests
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Cache SPM build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-fluxkit-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-fluxkit-spm-
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build (debug)
+        run: swift build -v
+
+      - name: Run unit tests
+        # Integration tests gated on model availability — auto-skip with a
+        # "[Test] SKIP" log line. Configuration + Generation unit tests run
+        # unconditionally.
+        run: swift test --parallel
+
+      - name: Build (release, smoke check)
+        # Catches release-only optimizer crashes (rare but real with MLX).
+        # Skip tests in release config — same code paths as debug.
+        run: swift build -c release

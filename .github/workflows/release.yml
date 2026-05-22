@@ -1,0 +1,72 @@
+name: Release
+
+# Tag-driven release. Push a `v*` tag (e.g. `v0.2.0`) and this workflow:
+#   1. Verifies the package still builds + tests pass at that tag
+#   2. Creates a GitHub Release with auto-generated notes from commits
+#      since the previous tag
+#
+# There is no binary artifact — FluxKit is a Swift Package, consumed via
+# SPM directly from the git URL. The Release exists for changelog visibility
+# and for SPM consumers that pin to a `from:` version range.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify build at tag
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Build
+        run: swift build -v
+
+      - name: Test
+        run: swift test --parallel
+
+  release:
+    name: Create GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for auto-generated notes
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            Swift Package release. Consume via SPM:
+
+            ```swift
+            .package(
+                url: "https://github.com/ArtemKyslicyn/Agent07FluxKit.git",
+                from: "${{ github.event.inputs.tag || github.ref_name }}"
+            )
+            ```
+
+            > Status: experimental. See [README — Known issues](https://github.com/ArtemKyslicyn/Agent07FluxKit#known-issues--limitations) before pinning in production.
