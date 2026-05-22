@@ -39,7 +39,17 @@ jobs:
         run: swift build -v
 
       - name: Test
-        run: swift test --parallel
+        # See ci.yml for why xcodebuild + serial testing — MLX metallib
+        # doesn't load under `swift test` on hosted runners.
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -scheme FluxKit \
+            -destination 'platform=macOS,arch=arm64' \
+            -configuration Debug \
+            -parallel-testing-enabled NO \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO
 
   release:
     name: Create GitHub Release

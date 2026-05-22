@@ -60,10 +60,26 @@ jobs:
         run: swift build -v
 
       - name: Run unit tests
+        # Use xcodebuild rather than `swift test` so MLX's metallib resource
+        # is bundled correctly into the test runner — `swift test` on hosted
+        # runners fails with "Failed to load the default metallib" because
+        # the resource lookup path differs from Xcode's. `-parallel-testing-
+        # enabled NO` keeps Metal device init single-threaded; mlx-swift
+        # crashes when multiple test workers try to load the metallib at
+        # once.
+        #
         # Integration tests gated on model availability — auto-skip with a
         # "[Test] SKIP" log line. Configuration + Generation unit tests run
         # unconditionally.
-        run: swift test --parallel
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -scheme FluxKit \
+            -destination 'platform=macOS,arch=arm64' \
+            -configuration Debug \
+            -parallel-testing-enabled NO \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Build (release, smoke check)
         # Catches release-only optimizer crashes (rare but real with MLX).
