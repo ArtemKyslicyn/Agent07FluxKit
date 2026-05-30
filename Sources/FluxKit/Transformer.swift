@@ -8,9 +8,12 @@
 //
 
 import Foundation
+import Logging
 import MLX
 import MLXFast
 import MLXNN
+
+private let logger = Logger(label: "FluxKit.Transformer")
 
 // MARK: - Conditioning Embedders
 
@@ -304,15 +307,17 @@ class SingleTransformerBlock: Module, @unchecked Sendable {
         let combined = MLX.concatenated([attnOut, mlpOut], axis: -1)
         let output = gate * projOut(combined)
 
-        // Debug: log gate and output magnitude (first call only)
+        #if FLUXKIT_DEBUG
+        // Each .item() is a synchronous GPU read — gate keeps it out of release builds.
         struct SingleDebug { nonisolated(unsafe) static var count = 0 }
         if SingleDebug.count < 3 || SingleDebug.count == 37 {
             let gateAbs = MLX.abs(gate).mean().item(Float.self)
             let outAbs = MLX.abs(output).mean().item(Float.self)
             let xAbs = MLX.abs(x).mean().item(Float.self)
-            fluxLog("single_block[\(SingleDebug.count)]: gate=\(gateAbs) output=\(outAbs) x_in=\(xAbs)")
+            logger.debug("single_block[\(SingleDebug.count)]: gate=\(gateAbs) output=\(outAbs) x_in=\(xAbs)")
         }
         SingleDebug.count += 1
+        #endif
 
         return x + output
     }
@@ -415,49 +420,58 @@ public class MultiModalDiffusionTransformer: Module, @unchecked Sendable {
 
         let emb = timeTextEmbed(timestep: timestep, pooledProjection: pooledPromptEmbeds, guidance: guidance)
 
-        // Debug: log input magnitudes (once per generation)
+        #if FLUXKIT_DEBUG
         struct DebugOnce { nonisolated(unsafe) static var step = 0 }
         let isFirstStep = DebugOnce.step == 0
         DebugOnce.step += 1
         if isFirstStep {
-            fluxLog("emb: abs_mean=\(MLX.abs(emb).mean().item(Float.self))")
-            fluxLog("hidden_in: abs_mean=\(MLX.abs(hidden).mean().item(Float.self))")
-            fluxLog("context_in: abs_mean=\(MLX.abs(context).mean().item(Float.self))")
-            fluxLog("ropeCos: shape=\(ropeCos.shape) ropeSin: shape=\(ropeSin.shape)")
+            logger.debug("emb: abs_mean=\(MLX.abs(emb).mean().item(Float.self))")
+            logger.debug("hidden_in: abs_mean=\(MLX.abs(hidden).mean().item(Float.self))")
+            logger.debug("context_in: abs_mean=\(MLX.abs(context).mean().item(Float.self))")
+            logger.debug("ropeCos: shape=\(ropeCos.shape) ropeSin: shape=\(ropeSin.shape)")
         }
+        #endif
 
         // Joint blocks (dual-stream)
         for (i, block) in jointBlocks.enumerated() {
             let result = block(hidden: hidden, context: context, emb: emb, ropeCos: ropeCos, ropeSin: ropeSin)
             hidden = result.0
             context = result.1
+            #if FLUXKIT_DEBUG
             if isFirstStep && (i == 0 || i == 1 || i == 9 || i == 18) {
-                fluxLog("joint[\(i)]: hidden_abs=\(MLX.abs(hidden).mean().item(Float.self)) ctx_abs=\(MLX.abs(context).mean().item(Float.self))")
+                logger.debug("joint[\(i)]: hidden_abs=\(MLX.abs(hidden).mean().item(Float.self)) ctx_abs=\(MLX.abs(context).mean().item(Float.self))")
             }
+            #endif
         }
 
         // Single blocks (merged stream)
         var merged = MLX.concatenated([context, hidden], axis: 1)
         for (i, block) in singleBlocks.enumerated() {
             merged = block(merged, emb: emb, ropeCos: ropeCos, ropeSin: ropeSin)
+            #if FLUXKIT_DEBUG
             if isFirstStep && (i == 0 || i == 1 || i == 19 || i == 37) {
-                fluxLog("single[\(i)]: merged_abs=\(MLX.abs(merged).mean().item(Float.self))")
+                logger.debug("single[\(i)]: merged_abs=\(MLX.abs(merged).mean().item(Float.self))")
             }
+            #endif
         }
 
         // Extract hidden states (skip context prefix)
         hidden = merged[0..., context.dim(1)..., 0...]
 
+        #if FLUXKIT_DEBUG
         if isFirstStep {
-            fluxLog("pre_norm: hidden_abs=\(MLX.abs(hidden).mean().item(Float.self))")
+            logger.debug("pre_norm: hidden_abs=\(MLX.abs(hidden).mean().item(Float.self))")
         }
+        #endif
 
         // Output projection
         let normed = normOut(hidden, conditioning: emb)
 
+        #if FLUXKIT_DEBUG
         if isFirstStep {
-            fluxLog("post_norm: normed_abs=\(MLX.abs(normed).mean().item(Float.self))")
+            logger.debug("post_norm: normed_abs=\(MLX.abs(normed).mean().item(Float.self))")
         }
+        #endif
 
         return projOut(normed)
     }

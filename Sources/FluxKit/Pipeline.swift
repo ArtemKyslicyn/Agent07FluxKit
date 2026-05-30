@@ -67,14 +67,18 @@ public struct DenoiseIterator: Sequence, IteratorProtocol {
             guidance: guidance?.expandedDimensions(axis: 0)
         )
 
-        // Debug: log noise magnitude
+        let dt = tNext - t
+
+        #if FLUXKIT_DEBUG
+        // Per-step magnitude probe. Each .item() is a synchronous GPU read that
+        // stalls the pipeline — keep gated so release builds never pay for it.
         let nMin = noise.min().item(Float.self)
         let nMax = noise.max().item(Float.self)
         let nMean = noise.mean().item(Float.self)
         let tVal = t.item(Float.self)
-        let dt = tNext - t
         let dtVal = dt.item(Float.self)
-        fluxLog("step=\(i) t=\(tVal) dt=\(dtVal) noise_min=\(nMin) noise_max=\(nMax) noise_mean=\(nMean)")
+        logger.debug("step=\(i) t=\(tVal) dt=\(dtVal) noise_min=\(nMin) noise_max=\(nMax) noise_mean=\(nMean)")
+        #endif
 
         // Euler step: latents += velocity * dt
         latents += noise * dt
@@ -250,30 +254,6 @@ func createPositionIDs(h16: Int, w16: Int, promptLen: Int) -> MLXArray {
     let imageIds = MLXArray(imagePositions.flatMap { $0 }).reshaped(h16 * w16, 3)
 
     return MLX.concatenated([textIds, imageIds.asType(.float32)], axis: 0).expandedDimensions(axis: 0)
-}
-
-// MARK: - File Logging
-
-/// Write to flux_debug.log in Application Support (readable without Xcode)
-func fluxLog(_ message: String) {
-    let fm = FileManager.default
-    let logDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-        .appendingPathComponent("Agent07/logs") ?? fm.temporaryDirectory
-    try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
-
-    let df = DateFormatter()
-    df.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-    let line = "[\(df.string(from: Date()))] [FluxKit] \(message)\n"
-    print(line.trimmingCharacters(in: .newlines))
-
-    let logFile = logDir.appendingPathComponent("flux_debug.log")
-    if let handle = try? FileHandle(forWritingTo: logFile) {
-        handle.seekToEndOfFile()
-        handle.write(line.data(using: .utf8) ?? Data())
-        handle.closeFile()
-    } else {
-        try? line.data(using: .utf8)?.write(to: logFile)
-    }
 }
 
 // MARK: - Memory Logging

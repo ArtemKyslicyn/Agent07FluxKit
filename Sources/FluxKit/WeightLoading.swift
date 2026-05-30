@@ -6,8 +6,11 @@
 //
 
 import Foundation
+import Logging
 import MLX
 import MLXNN
+
+private let logger = Logger(label: "FluxKit.WeightLoading")
 
 // MARK: - Weight Key Remapping
 
@@ -58,9 +61,9 @@ public func loadTransformerWeights(
         let matched = weightKeys.intersection(itemKeys)
         let unmatchedWeights = weightKeys.subtracting(itemKeys).sorted().prefix(10)
         let unmatchedItems = itemKeys.subtracting(weightKeys).sorted().prefix(10)
-        print("[FluxKit] Keys: \(weightKeys.count) weights, \(itemKeys.count) item params, \(matched.count) matched")
-        if !unmatchedWeights.isEmpty { print("[FluxKit] Unmatched WEIGHT keys (not in model): \(Array(unmatchedWeights))") }
-        if !unmatchedItems.isEmpty { print("[FluxKit] Unmatched ITEM keys (no weight): \(Array(unmatchedItems))") }
+        logger.info("Keys: \(weightKeys.count) weights, \(itemKeys.count) item params, \(matched.count) matched")
+        if !unmatchedWeights.isEmpty { logger.warning("Unmatched WEIGHT keys (not in model): \(Array(unmatchedWeights))") }
+        if !unmatchedItems.isEmpty { logger.warning("Unmatched ITEM keys (no weight): \(Array(unmatchedItems))") }
 
         // Verify shapes match before loading
         let modelParams = transformer.filterMap(
@@ -70,15 +73,15 @@ public func loadTransformerWeights(
         for (key, modelArray) in modelParams {
             if let weightArray = allWeights[key] {
                 if modelArray.shape != weightArray.shape {
-                    fluxLog("SHAPE MISMATCH: \(key) model=\(modelArray.shape) weight=\(weightArray.shape)")
+                    logger.warning("SHAPE MISMATCH: \(key) model=\(modelArray.shape) weight=\(weightArray.shape)")
                     shapeMismatches += 1
                 }
             }
         }
         if shapeMismatches > 0 {
-            fluxLog("WARNING: \(shapeMismatches) shape mismatches detected!")
+            logger.warning("\(shapeMismatches) shape mismatches detected")
         } else {
-            fluxLog("All matched weights have correct shapes")
+            logger.debug("All matched weights have correct shapes")
         }
 
         let params = ModuleParameters.unflattened(allWeights)
@@ -86,7 +89,7 @@ public func loadTransformerWeights(
     }
     // allWeights dict fully released before returning
     MLX.GPU.clearCache()
-    print("[FluxKit] Transformer loaded: \(tensorCount) tensors")
+    logger.info("Transformer loaded: \(tensorCount) tensors")
 }
 
 /// Load VAE weights. Transposes 4D Conv2d weights from NCHW to NHWC.
@@ -109,7 +112,7 @@ public func loadVAEWeights(_ vae: VAE, from file: URL, dtype: DType) throws {
         try vae.update(parameters: params, verify: .none)
     }
     MLX.GPU.clearCache()
-    print("[FluxKit] VAE loaded: \(tensorCount) tensors")
+    logger.info("VAE loaded: \(tensorCount) tensors")
 }
 
 /// Load T5 encoder weights.
@@ -140,7 +143,7 @@ public func loadT5EncoderWeights(_ encoder: T5Encoder, from directory: URL, dtyp
         try encoder.update(parameters: params, verify: .none)
     }
     MLX.GPU.clearCache()
-    print("[FluxKit] T5 Encoder loaded: \(tensorCount) tensors")
+    logger.info("T5 Encoder loaded: \(tensorCount) tensors")
 }
 
 /// Load CLIP encoder weights.
@@ -158,5 +161,5 @@ public func loadCLIPEncoderWeights(_ encoder: CLIPEncoder, from file: URL, dtype
         try encoder.update(parameters: params, verify: .none)
     }
     MLX.GPU.clearCache()
-    print("[FluxKit] CLIP Encoder loaded: \(tensorCount) tensors")
+    logger.info("CLIP Encoder loaded: \(tensorCount) tensors")
 }

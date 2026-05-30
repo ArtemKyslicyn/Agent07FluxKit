@@ -6,8 +6,11 @@
 //
 
 import Foundation
+import Logging
 import MLX
 import MLXNN
+
+private let logger = Logger(label: "FluxKit.Quantization")
 
 /// Quantize a FluxPipeline's models for reduced memory usage.
 public func quantizeFluxPipeline(
@@ -23,5 +26,5 @@ public func quantizeFluxPipeline(
     quantize(model: vae, groupSize: groupSize, bits: bits)
     quantize(model: t5Encoder, groupSize: groupSize, bits: bits)
     quantize(model: clipEncoder, groupSize: groupSize, bits: bits)
-    print("[FluxKit] Quantized to \(bits)-bit (groupSize=\(groupSize))")
+    logger.info("Quantized to \(bits)-bit (groupSize=\(groupSize))")
 }

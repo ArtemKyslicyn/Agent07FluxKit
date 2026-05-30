@@ -2,7 +2,7 @@
 
 Swift package — clean-room implementation of Flux text-to-image generation on Apple Silicon, built on top of [MLX](https://github.com/ml-explore/mlx-swift).
 
-> **Status: experimental / under active development.** The pipeline runs end-to-end and produces images, but output quality is still being tuned. See [Known issues](#known-issues--limitations) and [Development history](#development-history) before using in production.
+> **Status: experimental / under active development.** The pipeline runs end-to-end and produces images, but output quality is still being tuned. See [Known issues](#known-issues--limitations) and [Development history](#development-history) before using in production. Logging is wired through `swift-log` and hot-path probes are gated behind `FLUXKIT_DEBUG` — see [Logging](#logging).
 
 Extracted from [Agent07](https://github.com/ArtemKyslicyn/Agent07) — a macOS app for visual DAG-based AI agent pipelines — so the image-gen layer can be reused, audited, and improved independently.
 
@@ -13,9 +13,11 @@ Extracted from [Agent07](https://github.com/ArtemKyslicyn/Agent07) — a macOS a
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Example CLI](#example-cli)
 - [Supported models](#supported-models)
 - [Architecture](#architecture)
 - [Public API surface](#public-api-surface)
+- [Logging](#logging)
 - [Known issues & limitations](#known-issues--limitations)
 - [Development history](#development-history)
 - [Roadmap](#roadmap)
@@ -108,6 +110,30 @@ The `Tests/FluxKitTests/IntegrationTests.swift` test covers the full pipeline wi
 
 ---
 
+## Example CLI
+
+A runnable CLI lives under [`Examples/FluxKitDemo`](Examples/FluxKitDemo) — a standalone SPM package that consumes FluxKit via a local path dependency and writes a PNG to disk.
+
+```bash
+cd Examples/FluxKitDemo
+
+# First run — download Flux Schnell weights (~24 GB) and generate
+swift run flux-demo \
+    --download \
+    --prompt "a red apple on a white table, photorealistic" \
+    --out apple.png
+
+# Subsequent runs reuse the cached weights
+swift run flux-demo --prompt "a forest at dawn" --seed 7 --out forest.png
+
+# Dev model, 20 steps, INT4 quantization
+swift run flux-demo --model dev --steps 20 --quantize --out dev.png
+```
+
+`swift run flux-demo --help` for the full flag list. See [`Examples/README.md`](Examples/README.md) for the full set of demos and instructions for pointing them at a published FluxKit tag instead of the working copy.
+
+---
+
 ## Supported models
 
 | Preset | HuggingFace ID | Steps | CFG | Notes |
@@ -167,22 +193,51 @@ Re-exports: `MLX` is re-exported from `FluxKit`, so callers don't need a separat
 
 ---
 
+## Logging
+
+FluxKit emits its logs through [`swift-log`](https://github.com/apple/swift-log). Each source file uses a labelled `Logger`:
+
+| Label | What it covers |
+|---|---|
+| `FluxKit.Pipeline` | Pipeline load milestones, MLX memory snapshots, per-step magnitude probes (debug only). |
+| `FluxKit.Transformer` | Joint/single block input/output magnitudes (debug only). |
+| `FluxKit.WeightLoading` | Tensor counts, unmatched keys, shape mismatches. |
+| `FluxKit.Quantization` | Quantization summary. |
+
+To capture or filter logs in your host app, bootstrap the logging system before calling FluxKit:
+
+```swift
+import Logging
+
+LoggingSystem.bootstrap { label in
+    var handler = StreamLogHandler.standardOutput(label: label)
+    handler.logLevel = .info  // .debug for verbose, .warning to silence
+    return handler
+}
+```
+
+**Hot-path probes.** Per-step and per-block magnitude probes call `.item()` on MLX arrays — a synchronous GPU read that stalls the pipeline. They are gated behind the `FLUXKIT_DEBUG` compile flag and are entirely excluded from release builds. To re-enable them for debugging:
+
+```bash
+swift build -Xswiftc -DFLUXKIT_DEBUG
+```
+
+---
+
 ## Known issues & limitations
 
 ### Active, will affect users
 
 1. **Output quality still being tuned.** The pipeline produces structured images, but fidelity vs. the reference PyTorch implementation has not been formally benchmarked. Magnitude growth across denoise steps is verified linear (see commit `f2f1e146`), but pixel-level correctness has not been bit-exact validated.
-2. **Heavy debug logging in hot path.** `Pipeline.swift` calls `fluxLog(...)` every denoise step, and `Transformer.swift` logs per joint/single block. This slows inference and writes a multi-MB log per generation. Set the relevant debug flag to silence (or strip `fluxLog` calls in your fork) for production use.
-3. **`fluxLog` hardcodes Agent07's path.** The debug writer opens `~/Library/Application Support/Agent07/logs/flux_debug.log` — a leftover from the original integration. Standalone consumers will see logs land in that directory. Tracking issue: planned migration to `swift-log` (already a dependency).
-4. **`EvaluateParameters` is `@unchecked Sendable`** because `MLXArray` is not `Sendable`. Treat as a value type; do not mutate concurrently.
-5. **No streaming back-pressure.** `DenoiseIterator.next()` blocks for one step's worth of compute (hundreds of ms to seconds depending on resolution/quantization). Wrap in `Task.detached` if you need async cancellation.
+2. **`EvaluateParameters` is `@unchecked Sendable`** because `MLXArray` is not `Sendable`. Treat as a value type; do not mutate concurrently.
+3. **No streaming back-pressure.** `DenoiseIterator.next()` blocks for one step's worth of compute (hundreds of ms to seconds depending on resolution/quantization). Wrap in `Task.detached` if you need async cancellation.
 
 ### Won't affect most users, but worth knowing
 
-6. **`FluxConfiguration.flux1KontextDev` has no integration test.** Only `flux1Schnell` is covered end-to-end in `IntegrationTests.testGenerateAndSavePNG`.
-7. **LoRA support is a stub.** `LoadConfiguration.loraPath` is accepted but not wired through weight loading yet.
-8. **VAE and CLIP are never quantized** even when `LoadConfiguration.quantize=true`. Only the transformer and T5 encoder are quantized — by design, since VAE/CLIP quantization broke output in earlier experiments (`f370b319`).
-9. **Sigma schedule** uses linear spacing with optional `shiftSigmas` from the Flux paper. No support yet for DPM-Solver, Karras, or custom schedulers.
+4. **`FluxConfiguration.flux1KontextDev` has no integration test.** Only `flux1Schnell` is covered end-to-end in `IntegrationTests.testGenerateAndSavePNG`.
+5. **LoRA support is a stub.** `LoadConfiguration.loraPath` is accepted but not wired through weight loading yet.
+6. **VAE and CLIP are never quantized** even when `LoadConfiguration.quantize=true`. Only the transformer and T5 encoder are quantized — by design, since VAE/CLIP quantization broke output in earlier experiments (`f370b319`).
+7. **Sigma schedule** uses linear spacing with optional `shiftSigmas` from the Flux paper. No support yet for DPM-Solver, Karras, or custom schedulers.
 
 ---
 
@@ -201,6 +256,7 @@ FluxKit is a **clean-room** Swift/MLX reimplementation, not a port. The path fro
 | `04fa08ec` | Memory safety on first load; broken `patch-deps` build | Memory safety check using available RAM before loading; build fix. |
 | `7285e872` | Actor isolation issues in consumer adapter | Hardened actor isolation, AsyncStream lifecycle, JSON-RPC framing (in `Agent07FluxServices`, not FluxKit core, but related work). |
 | `2442d0c3` | Extraction to standalone repo | This repo. |
+| `v0.2.0`   | Standalone-consumer ergonomics | `fluxLog` removed; all logging goes through `swift-log`. Per-step / per-block magnitude probes gated behind `#if FLUXKIT_DEBUG` so the hot path no longer does synchronous GPU reads in release builds. `Examples/FluxKitDemo` CLI added. |
 
 For context, the project memory has a detailed write-up of the RoPE diagnosis at the time of the bug — see [`memory/flux_debug_status.md`](https://github.com/ArtemKyslicyn/Agent07) in the parent repo.
 
@@ -210,15 +266,16 @@ For context, the project memory has a detailed write-up of the RoPE diagnosis at
 
 Sorted roughly by priority. Contributions welcome.
 
-- [ ] **Replace `fluxLog` with `swift-log`** (already a dependency). Decouple from Agent07's filesystem layout, drop the file handle race.
+- [x] **Replace `fluxLog` with `swift-log`** — landed in 0.2.0. All FluxKit modules now log through labelled `Logging.Logger` instances; the Agent07-specific file writer is gone.
+- [x] **Strip per-step / per-block logging from default builds** — landed in 0.2.0. Magnitude probes are gated behind `#if FLUXKIT_DEBUG`; release builds drop them entirely.
+- [x] **CI** — `.github/workflows/ci.yml` builds + runs unit tests on `macos-15` for every push and PR; `release.yml` cuts a Release on `v*` tags.
+- [x] **Example CLI** — [`Examples/FluxKitDemo`](Examples/FluxKitDemo) ships a runnable `swift run flux-demo`.
 - [ ] **Bit-exact validation** against PyTorch reference on a fixed seed + prompt. Without this, "the output looks plausible" is the best we can claim.
-- [ ] **Strip per-step / per-block logging from default builds.** Gate behind `FLUXKIT_DEBUG` compile flag or a `Logger.LogLevel` filter.
 - [ ] **Integration test for Kontext-dev.**
 - [ ] **LoRA loading** — wire `LoadConfiguration.loraPath` into `WeightLoading`.
 - [ ] **Make `MLXArray`-carrying value types properly `Sendable`** (or document the threading contract more loudly).
 - [ ] **Schedulers** beyond linear + sigma-shift (DPM-Solver, Karras).
 - [ ] **Batch inference** — currently one image per pipeline call.
-- [ ] **CI** — currently no remote builds. Need at least a "package resolves and compiles" check on `macos-latest`.
 
 ---
 
