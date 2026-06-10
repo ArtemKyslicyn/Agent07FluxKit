@@ -4,12 +4,21 @@ Swift package — clean-room implementation of Flux text-to-image generation on 
 
 > **Status: experimental / under active development.** The pipeline runs end-to-end and produces images, but output quality is still being tuned. See [Known issues](#known-issues--limitations) and [Development history](#development-history) before using in production. Logging is wired through `swift-log` and hot-path probes are gated behind `FLUXKIT_DEBUG` — see [Logging](#logging).
 
-Extracted from [Agent07](https://github.com/ArtemKyslicyn/Agent07) — a macOS app for visual DAG-based AI agent pipelines — so the image-gen layer can be reused, audited, and improved independently.
+---
+
+## About
+
+FluxKit is the **public MLX FLUX engine** of the [Agent07](https://github.com/ArtemKyslicyn/Agent07) open-core ecosystem — a macOS app for visual DAG-based AI agent pipelines. The image-generation layer was extracted out of the app so it can be reused, audited, and improved independently of the closed product.
+
+Inside Agent07, FluxKit is consumed by the **private `Agent07FluxServices` package**, which adapts this engine behind the app's internal `FluxServicing` protocol (actor isolation, `AsyncStream` progress, cancellation, and app wiring all live there — none of it leaks into this package). FluxKit itself stays dependency-light and app-agnostic: it knows about MLX, HuggingFace Hub, and `swift-log`, and nothing about Agent07.
+
+This is a **clean-room** Swift/MLX reimplementation of the FLUX.1 inference architecture — not a port of the PyTorch reference. See [Development history](#development-history) for the path from "produces noise" to "produces images."
 
 ---
 
 ## Table of contents
 
+- [About](#about)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick start](#quick-start)
@@ -149,7 +158,7 @@ All presets use the same `MultiModalDiffusionTransformer`, T5 + CLIP text encode
 ## Architecture
 
 ```
-TextToImageGenerator (protocol, Pipeline.swift)
+ImageGenerator (protocol) ◄── TextToImageGenerator (protocol, Pipeline.swift)
 └── FluxPipeline (concrete)
     ├── T5Encoder           (TextEncoders.swift)  — prompt tokens → embeddings
     ├── CLIPEncoder         (TextEncoders.swift)  — pooled prompt vector
@@ -182,14 +191,19 @@ Source files (`Sources/FluxKit/`):
 
 The library exposes a small surface. Most callers only need:
 
-- `FluxConfiguration` — model presets and factory entry point
+- `FluxConfiguration` — model presets and factory entry point (`textToImageGenerator(hub:configuration:)`, `download(hub:progressHandler:)`, `defaultParameters()`)
 - `LoadConfiguration` — `float16` / `quantize` / `loraPath` toggles
-- `EvaluateParameters` — `width`, `height`, `numInferenceSteps`, `guidance`, `seed`, `prompt`
-- `TextToImageGenerator` (protocol) — `generateLatents(parameters:) -> DenoiseIterator` and `decode(xt:) -> MLXArray`
-- `DenoiseIterator` — `Sequence & IteratorProtocol<MLXArray>`, one element per inference step
+- `EvaluateParameters` — `width`, `height`, `numInferenceSteps`, `guidance`, `seed`, `prompt`, `sigmas`; plus the static `computeSigmas(steps:shift:width:height:)` helper
+- `ImageGenerator` (protocol) — base capability: `decode(xt:) -> MLXArray`
+- `TextToImageGenerator` (protocol, refines `ImageGenerator`) — adds `generateLatents(parameters:) -> DenoiseIterator` and `conditionText(prompt:) -> (MLXArray, MLXArray)`
+- `FluxPipeline` (concrete, conforms to `TextToImageGenerator`) — the engine returned by the factory; also exposes `static load(...)` for callers that want to construct it directly
+- `DenoiseIterator` — `Sequence & IteratorProtocol`, yields one `MLXArray` latent per inference step (`i` exposes the current step index)
+- `FluxKitError` (enum, `LocalizedError`) — thrown for missing weights, unreadable configs, etc.; surface its `localizedDescription` to users
 - `MultiModalDiffusionTransformer` — exposed for advanced users wanting to swap in custom blocks
 
-Re-exports: `MLX` is re-exported from `FluxKit`, so callers don't need a separate `import MLX`.
+Lower-level building blocks (`T5Encoder`, `CLIPEncoder`, `VAE`, `EmbedND`, the `applyRope` / `timestepProjection` functions, the `loadTransformerWeights` / `loadVAEWeights` / `loadT5EncoderWeights` / `loadCLIPEncoderWeights` loaders, `quantizeFluxPipeline`, and the tokenizer helpers) are also `public` for assembling a custom pipeline, but most callers should stay on `FluxConfiguration` + `TextToImageGenerator`.
+
+Re-exports: `MLX` is `@_exported` from `FluxKit`, so callers don't need a separate `import MLX`.
 
 ---
 
@@ -285,6 +299,24 @@ Sorted roughly by priority. Contributions welcome.
 swift test --package-path .
 ```
 
+CI runs the suite through **`xcodebuild`** rather than `swift test` (see `.github/workflows/ci.yml`):
+
+```bash
+xcodebuild test \
+    -scheme FluxKit \
+    -destination 'platform=macOS,arch=arm64' \
+    -configuration Debug \
+    -parallel-testing-enabled NO \
+    CODE_SIGNING_ALLOWED=NO
+```
+
+Two MLX-specific reasons for this:
+
+- **`xcodebuild` bundles MLX's metallib correctly.** On hosted runners, `swift test` fails with `Failed to load the default metallib` because its resource-lookup path differs from Xcode's.
+- **`-parallel-testing-enabled NO`** keeps Metal device init single-threaded — mlx-swift crashes when multiple test workers try to load the metallib at once.
+
+CI runs build (debug) → unit tests (xcodebuild, serial) → build (release smoke check) on `macos-15` / Xcode 16.4 for every push to `main` and every PR (docs-only changes are path-ignored). `release.yml` cuts a GitHub Release on `v*` tags.
+
 Tests fall into two tiers:
 
 **Unit tests** — always run, no model required:
@@ -310,7 +342,7 @@ To run integration tests, download via `config.download(hub:progressHandler:)` o
 |---|---|---|
 | [ml-explore/mlx-swift](https://github.com/ml-explore/mlx-swift) | `.upToNextMinor(from: "0.25.4")` | Tensor ops, NN modules, fast attention |
 | [huggingface/swift-transformers](https://github.com/huggingface/swift-transformers) | `.upToNextMinor(from: "0.1.21")` | T5 + CLIP tokenizers, HuggingFace Hub downloads |
-| [apple/swift-log](https://github.com/apple/swift-log) | `from: "1.5.3"` | Logging facade (currently underused — see roadmap) |
+| [apple/swift-log](https://github.com/apple/swift-log) | `from: "1.5.3"` | Logging facade — every FluxKit module logs through a labelled `Logging.Logger` (see [Logging](#logging)) |
 
 MLX is Apple Silicon only by design — there is no CUDA / Linux build target.
 
